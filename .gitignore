@@ -23,3 +23,7 @@ __pycache__/
 *.log
 .env
 .env.*
+
+# Generated AV calibration media and analysis outputs
+/avlatency/workdir/*
+!/avlatency/workdir/.gitkeep

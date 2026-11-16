@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>音画延迟校准面板</title>
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<header>
+  <h1>音画输出延迟校准 · 多端制作面板</h1>
+  <div id="verdict-badge" class="badge idle">未校准</div>
+</header>
+
+<main>
+  <section class="panel" id="control-panel">
+    <h2>1 · 触发校准</h2>
+    <div class="tabs">
+      <button class="tab active" data-tab="sim">可控录制链（仿真）</button>
+      <button class="tab" data-tab="upload">真实录制文件</button>
+    </div>
+
+    <div class="tab-body" id="tab-sim">
+      <p class="hint">由内核真实生成闪光+脉冲媒体，再施加物理延迟/噪声/丢事件/帧率。</p>
+      <div class="grid">
+        <label>事件数 <input type="number" id="n_events" value="24" min="8" max="60"></label>
+        <label>源帧率 <input type="number" id="source_fps" value="30" step="1"></label>
+        <label>录制帧率 <input type="number" id="recorded_fps" value="24" step="1"></label>
+        <label>声道数 <input type="number" id="channels" value="2" min="1" max="2"></label>
+        <label>音频延迟ch0 (ms) <input type="number" id="ad0" value="120"></label>
+        <label>音频延迟ch1 (ms) <input type="number" id="ad1" value="140"></label>
+        <label>视频延迟 (ms) <input type="number" id="vd" value="180"></label>
+        <label>音频噪声σ <input type="number" id="audio_noise" value="0.004" step="0.002"></label>
+        <label>亮度噪声σ <input type="number" id="brightness_noise" value="0.004" step="0.002"></label>
+        <label>曝光漂移/秒 <input type="number" id="exposure_drift" value="0.03" step="0.005"></label>
+        <label>回声延迟 (ms) <input type="number" id="echo_delay" value="0"></label>
+        <label>回声增益 <input type="number" id="echo_gain" value="0.5" step="0.1"></label>
+        <label class="wide">丢弃事件编号(逗号) <input type="text" id="dropped_events" value="5,11"></label>
+      </div>
+      <button id="run-sim" class="primary">运行校准</button>
+    </div>
+
+    <div class="tab-body hidden" id="tab-upload">
+      <p class="hint">上传对播放中校准片段的真实录制（mp4/mov/mkv）。起点未知时仅报告音画相对偏移，不宣称绝对延迟。</p>
+      <input type="file" id="rec-file" accept="video/*" />
+      <button id="run-upload" class="primary">分析录制</button>
+    </div>
+    <div id="run-status" class="status"></div>
+  </section>
+
+  <section class="panel" id="result-panel">
+    <h2>2 · 测量结果</h2>
+    <div id="reasons"></div>
+    <div id="metrics"></div>
+    <div id="av-offsets"></div>
+    <div id="origin-note"></div>
+  </section>
+
+  <section class="panel" id="adjust-panel">
+    <h2>3 · 延迟调整（由校准内核驱动）</h2>
+    <p class="hint">仅在校准成功后可用；失败/未锚定时控件锁定，反馈回内核状态。</p>
+    <div id="adjust-controls" class="grid"></div>
+    <button id="apply-delay" class="primary" disabled>应用修正</button>
+    <div id="applied-feedback" class="status"></div>
+  </section>
+
+  <section class="panel" id="inspect-panel">
+    <h2>4 · 原始波形 / 亮度 / 选中事件</h2>
+    <div class="legend">
+      <span><i class="dot sync"></i>SYNC</span>
+      <span><i class="dot event"></i>普通事件</span>
+      <span><i class="dot bracket"></i>视频帧边界区间</span>
+      <span><i class="dot dup"></i>重复峰/未配对</span>
+    </div>
+    <canvas id="wave-canvas" height="180"></canvas>
+    <canvas id="bright-canvas" height="180"></canvas>
+    <div id="event-detail" class="event-detail">点击图上的事件标记查看编号与不确定性。</div>
+    <div id="media-links"></div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

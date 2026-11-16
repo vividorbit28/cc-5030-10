@@ -1,0 +1,4 @@
+# Runtime dependencies. ffmpeg is provided by the imageio-ffmpeg wheel
+# (a static binary); no system ffmpeg install is required.
+numpy>=1.24
+imageio-ffmpeg>=0.5
