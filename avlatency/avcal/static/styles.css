@@ -71,6 +71,12 @@ canvas { width: 100%; background: #0b0f14; border-radius: 8px; margin-top: 10px;
 .dot.event { background: #4cc9f0; }
 .dot.bracket { background: #ef476f; }
 .dot.dup { background: #8d99ae; }
+.dot.holdout { background: transparent; border: 2px solid #b8c4d4; }
+.dot.excluded { background: #ef476f; }
+.dot.jump { background: #ffd166; }
+.dot.gap { background: rgba(255,209,102,0.35); }
+.dot.corrected { background: #57d98a; }
+.warn-text { color: #e8c15a; }
 .event-detail {
   margin-top: 12px; font-size: 13px; background: #0f1419;
   border: 1px solid #232c38; border-radius: 8px; padding: 12px; min-height: 42px;

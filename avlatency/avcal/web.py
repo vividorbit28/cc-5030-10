@@ -12,17 +12,27 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
 from . import reader as reader_mod
-from .calibrate import run_on_recording
+from .calibrate import export_playback_params, run_on_recording
 from .chain import ChainConfig, run_chain
 from .media import MediaConfig, generate
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+
+def _pairs(value) -> list[tuple[float, float]]:
+    """Normalise [[a, b], ...] params to a list of float tuples."""
+    out = []
+    for item in value or []:
+        a, b = item
+        out.append((float(a), float(b)))
+    return out
 
 
 class JobStore:
@@ -34,6 +44,7 @@ class JobStore:
         self.jobs: dict[str, dict] = {}
         self.applied_delay: dict[str, float] = {}
         self.current_job: str | None = None
+        self.validation_log: list[dict] = []  # one entry per applied correction
 
     def create(self, kind: str, params: dict) -> str:
         job_id = uuid.uuid4().hex[:12]
@@ -113,6 +124,10 @@ def run_simulation(job: dict, store: JobStore) -> None:
             echo_gain=float(p.get("echo_gain", 0.5)),
             exposure_drift=float(p.get("exposure_drift", 0.0)),
             brightness_noise_std=float(p.get("brightness_noise", 0.004)),
+            clock_drift_ppm=float(p.get("clock_drift_ppm", 0.0)),
+            delay_steps=_pairs(p.get("delay_steps")),
+            misaligned_events=[(int(a), b) for a, b in
+                               _pairs(p.get("misaligned_events"))],
         )
         if len(chain.audio_delay) != cfg.channels:
             chain.audio_delay = [chain.audio_delay[0]] * cfg.channels
@@ -121,6 +136,7 @@ def run_simulation(job: dict, store: JobStore) -> None:
             out.audio, out.luminance, out.frame_times, events, cfg,
             out.recorded_fps, origin_known=True)
         job["result"] = result.to_dict()
+        job["result_obj"] = result
         job["ground_truth"] = out.ground_truth
         job["series"] = _series_payload(
             job, out.audio, out.luminance, out.frame_times, adets, vdets, cfg)
@@ -145,6 +161,7 @@ def run_recording_analysis(job: dict, store: JobStore, upload_path: str) -> None
             rec["audio"], rec["luminance"], rec["frame_times"],
             gen["events"], cfg, rec["recorded_fps"], origin_known=False)
         job["result"] = result.to_dict()
+        job["result_obj"] = result
         job["series"] = _series_payload(
             job, rec["audio"], rec["luminance"], rec["frame_times"],
             adets, vdets, cfg)
@@ -154,6 +171,53 @@ def run_recording_analysis(job: dict, store: JobStore, upload_path: str) -> None
     except Exception as exc:
         job["status"] = "failed"
         job["error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _corrected_offsets(result: dict, applied: dict[str, float]):
+    """Actual arithmetic behind the panel's post-adjustment display.
+
+    Adding a delay to a path shifts that path later, so the audio-minus-video
+    offset moves by (audio_applied - video_applied); per-channel presentation
+    offsets move by their own applied delay. Values outside the measured 95%
+    interval are flagged as anomalies for the delay-calibration UI."""
+    v_ap = float(applied.get("video_delay_ms", 0.0))
+    av, channels, anomalies = [], [], []
+    for o in result.get("av_offsets", []):
+        ch = o["channel"]
+        a_ap = float(applied.get(f"audio_ch{ch}_delay_ms", 0.0))
+        corr = o["audio_minus_video_ms"] + a_ap - v_ap
+        half = (o["ci95_hi_ms"] - o["ci95_lo_ms"]) / 2.0
+        av.append({"channel": ch, "corrected_ms": corr,
+                   "ci95_half_ms": half})
+        if abs(corr) > half:
+            anomalies.append(
+                f"通道{ch} 修正后音画偏移 {corr:+.2f} ms 超出测量95%区间"
+                f"半宽 {half:.2f} ms——请复核延迟设置")
+    for a in result.get("audio", []):
+        ch = a["channel"]
+        a_ap = float(applied.get(f"audio_ch{ch}_delay_ms", 0.0))
+        channels.append({"kind": "audio", "channel": ch,
+                         "corrected_ms": a["offset"] * 1000.0 + a_ap,
+                         "applied_ms": a_ap})
+    v = result.get("video")
+    if v:
+        channels.append({"kind": "video", "channel": -1,
+                         "corrected_ms": v["offset"] * 1000.0 + v_ap,
+                         "applied_ms": v_ap})
+    return {"av": av, "channels": channels}, anomalies
+
+
+def _holdout_summary(result: dict) -> dict:
+    out = {}
+    for key, da in (result.get("drift") or {}).items():
+        out[key] = {
+            "rms_before_ms": (None if da["rms_before"] is None
+                              else da["rms_before"] * 1000.0),
+            "rms_after_ms": (None if da["rms_after"] is None
+                             else da["rms_after"] * 1000.0),
+            "n_points": len(da["validation_points"]),
+        }
+    return out
 
 
 class PanelHandler(BaseHTTPRequestHandler):
@@ -182,7 +246,10 @@ class PanelHandler(BaseHTTPRequestHandler):
         elif path == "/api/state":
             job = self.store.latest()
             self._json({"job": self._public(job) if job else None,
-                        "applied_delay": self.store.applied_delay})
+                        "applied_delay": self.store.applied_delay,
+                        "validation_log": self.store.validation_log})
+        elif path == "/api/export":
+            self._handle_export()
         elif path.startswith("/api/jobs/"):
             job_id = path.split("/")[3]
             job = self.store.get(job_id)
@@ -269,7 +336,44 @@ class PanelHandler(BaseHTTPRequestHandler):
         with self.store.lock:
             for key, val in payload.get("delay_ms", {}).items():
                 self.store.applied_delay[key] = float(val)
-        self._json({"ok": True, "applied_delay": self.store.applied_delay})
+            applied = dict(self.store.applied_delay)
+        # Playback markers and measurement offsets update by real arithmetic
+        # on the kernel result; anomalies feed back to this UI.
+        corrected, anomalies = _corrected_offsets(result, applied)
+        entry = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "job_id": job["id"],
+            "applied_delay": applied,
+            "corrected": corrected,
+            "anomalies": anomalies,
+            "holdout_validation": _holdout_summary(result),
+        }
+        with self.store.lock:
+            self.store.validation_log.append(entry)
+        self._json({"ok": True, "applied_delay": applied,
+                    "corrected": corrected, "anomalies": anomalies,
+                    "validation_log": self.store.validation_log})
+
+    def _handle_export(self):
+        job = self.store.latest()
+        if not job or job["status"] != "done" or not job.get("result_obj"):
+            self._json({"error": "no successful calibration to export"}, 409)
+            return
+        doc = export_playback_params(job["result_obj"])
+        os.makedirs(os.path.join(self.store.workdir, "exports"),
+                    exist_ok=True)
+        fp = os.path.join(self.store.workdir, "exports",
+                          f"playback_params_{job['id']}.json")
+        with open(fp, "w") as fh:
+            json.dump(doc, fh, indent=2, ensure_ascii=False)
+        body = json.dumps(doc, ensure_ascii=False).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Disposition",
+                         "attachment; filename=playback_params.json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _public(self, job: dict) -> dict:
         return {k: job.get(k) for k in

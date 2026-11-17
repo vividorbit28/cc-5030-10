@@ -21,7 +21,7 @@
     </div>
 
     <div class="tab-body" id="tab-sim">
-      <p class="hint">由内核真实生成闪光+脉冲媒体，再施加物理延迟/噪声/丢事件/帧率。</p>
+      <p class="hint">由内核真实生成闪光+脉冲媒体，再施加物理延迟/噪声/丢事件/帧率/时钟漂移/跳变。</p>
       <div class="grid">
         <label>事件数 <input type="number" id="n_events" value="24" min="8" max="60"></label>
         <label>源帧率 <input type="number" id="source_fps" value="30" step="1"></label>
@@ -35,6 +35,11 @@
         <label>曝光漂移/秒 <input type="number" id="exposure_drift" value="0.03" step="0.005"></label>
         <label>回声延迟 (ms) <input type="number" id="echo_delay" value="0"></label>
         <label>回声增益 <input type="number" id="echo_gain" value="0.5" step="0.1"></label>
+        <label>时钟漂移 (ppm) <input type="number" id="clock_drift_ppm" value="0" step="50"></label>
+        <label>跳变时刻 (s) <input type="number" id="step_time" value="0" step="0.5" min="0"></label>
+        <label>跳变延迟增量 (ms) <input type="number" id="step_delta" value="0" step="10"></label>
+        <label>误匹配事件编号 <input type="number" id="mis_idx" value="-1" min="-1"></label>
+        <label>误匹配平移 (ms) <input type="number" id="mis_shift" value="30" step="5"></label>
         <label class="wide">丢弃事件编号(逗号) <input type="text" id="dropped_events" value="5,11"></label>
       </div>
       <button id="run-sim" class="primary">运行校准</button>
@@ -49,28 +54,53 @@
   </section>
 
   <section class="panel" id="result-panel">
-    <h2>2 · 测量结果</h2>
+    <h2>2 · 测量结果（基准固定延迟）</h2>
     <div id="reasons"></div>
     <div id="metrics"></div>
     <div id="av-offsets"></div>
     <div id="origin-note"></div>
   </section>
 
+  <section class="panel" id="drift-panel">
+    <h2>3 · 漂移 / 跳变分析（连续观测）</h2>
+    <p class="hint">残差序列拟合为可解释分段：稳定时钟速差 / 设备重启跳变 / 偶发检测误差。
+      剔除点全部留痕；数据不足区间不给参数；外推误差单独报告。</p>
+    <div id="drift-channel-tabs" class="tabs"></div>
+    <div id="drift-notes"></div>
+    <canvas id="drift-canvas" height="200"></canvas>
+    <div class="legend">
+      <span><i class="dot event"></i>拟合点</span>
+      <span><i class="dot holdout"></i>独立留出验证点</span>
+      <span><i class="dot excluded"></i>剔除点（留痕）</span>
+      <span><i class="dot jump"></i>跳变边界</span>
+      <span><i class="dot gap"></i>数据空洞（不给参数）</span>
+    </div>
+    <div id="drift-segments"></div>
+    <div id="drift-excluded"></div>
+    <div id="drift-validation"></div>
+    <button id="export-params" class="primary" disabled>导出播放系统参数（JSON）</button>
+    <div class="hint">导出仅生成参数文件供播放系统采用，本工具不修改任何真实设备设置。</div>
+    <div id="export-status" class="status"></div>
+  </section>
+
   <section class="panel" id="adjust-panel">
-    <h2>3 · 延迟调整（由校准内核驱动）</h2>
+    <h2>4 · 延迟调整（由校准内核驱动）</h2>
     <p class="hint">仅在校准成功后可用；失败/未锚定时控件锁定，反馈回内核状态。</p>
     <div id="adjust-controls" class="grid"></div>
     <button id="apply-delay" class="primary" disabled>应用修正</button>
     <div id="applied-feedback" class="status"></div>
+    <div id="corrected-offsets"></div>
+    <div id="validation-log"></div>
   </section>
 
   <section class="panel" id="inspect-panel">
-    <h2>4 · 原始波形 / 亮度 / 选中事件</h2>
+    <h2>5 · 原始波形 / 亮度 / 选中事件</h2>
     <div class="legend">
       <span><i class="dot sync"></i>SYNC</span>
       <span><i class="dot event"></i>普通事件</span>
       <span><i class="dot bracket"></i>视频帧边界区间</span>
       <span><i class="dot dup"></i>重复峰/未配对</span>
+      <span><i class="dot corrected"></i>应用修正后的播放标记</span>
     </div>
     <canvas id="wave-canvas" height="180"></canvas>
     <canvas id="bright-canvas" height="180"></canvas>

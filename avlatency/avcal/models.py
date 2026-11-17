@@ -80,6 +80,104 @@ class ChannelResult:
 
 
 @dataclass
+class SegmentInfo:
+    """One interpretable piece of the residual series (offset + clock rate)."""
+
+    t_lo: float                  # first fitted observation time (s)
+    t_hi: float                  # last fitted observation time (s)
+    t_ref: float                 # centring time: offset is quoted here
+    n_fit: int
+    n_holdout: int
+    status: str                  # 'ok' | 'insufficient'
+    offset: float | None         # seconds at t_ref; None when insufficient
+    offset_ci95: float | None
+    slope: float | None          # s per s (clock rate error); ppm = *1e6
+    slope_ci95: float | None
+    offset_var: float | None     # regression variances, for prediction bands
+    slope_var: float | None
+    gaps: list[list[float]]      # [lo, hi] intervals without confirming data
+    classification: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ExcludedPoint:
+    """An outlier removed from fitting. Never silent: the numeric basis of
+    the decision is kept so the exclusion can be audited later."""
+
+    event_index: int
+    time: float
+    residual: float
+    reason: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class JumpInfo:
+    """A detected step between two segments (device-restart style jump)."""
+
+    time: float                  # boundary between segments (s)
+    step: float                  # fitted level change at the boundary (s)
+    step_ci95: float
+    note: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ValidationPoint:
+    """One held-out sample. It never took part in fitting; before/after
+    residuals on these points are the honest check of the model."""
+
+    event_index: int
+    time: float
+    residual_before: float       # raw det - nominal (uncorrected)
+    residual_after: float | None # residual minus model prediction
+    status: str                  # 'ok' | 'gap' | 'extrapolated' | 'insufficient'
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class DriftAnalysis:
+    """Piecewise drift/jump fit of one channel's residual series."""
+
+    segments: list[SegmentInfo]
+    jumps: list[JumpInfo]
+    excluded: list[ExcludedPoint]
+    validation_points: list[ValidationPoint]
+    rms_before: float | None     # holdout RMS of raw residuals (s)
+    rms_after: float | None      # holdout RMS after model correction (s)
+    max_abs_after: float | None
+    t_lo: float                  # coverage range of the whole series
+    t_hi: float
+    notes: list[str]
+    fit_series: list[list[float]] = field(default_factory=list)
+    # [time_s, residual_s] pairs actually used for fitting (post-exclusion)
+
+    def to_dict(self) -> dict:
+        return {
+            "segments": [s.to_dict() for s in self.segments],
+            "jumps": [j.to_dict() for j in self.jumps],
+            "excluded": [e.to_dict() for e in self.excluded],
+            "validation_points": [v.to_dict() for v in self.validation_points],
+            "rms_before": self.rms_before,
+            "rms_after": self.rms_after,
+            "max_abs_after": self.max_abs_after,
+            "t_lo": self.t_lo,
+            "t_hi": self.t_hi,
+            "notes": self.notes,
+            "fit_series": self.fit_series,
+        }
+
+
+@dataclass
 class CalibrationResult:
     verdict: str                 # 'pass' | 'warn' | 'fail'
     reasons: list[str]
@@ -90,6 +188,7 @@ class CalibrationResult:
     fps_recorded: float | None
     sample_rate: int | None
     suggested_delay_ms: dict[str, float]
+    drift: dict[str, DriftAnalysis] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -102,4 +201,5 @@ class CalibrationResult:
             "fps_recorded": self.fps_recorded,
             "sample_rate": self.sample_rate,
             "suggested_delay_ms": self.suggested_delay_ms,
+            "drift": {k: v.to_dict() for k, v in self.drift.items()},
         }

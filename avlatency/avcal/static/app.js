@@ -1,7 +1,8 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-let state = { job: null, applied: {}, selected: null };
+let state = { job: null, applied: {}, selected: null, driftKey: null,
+              validationLog: [] };
 
 // ---- tab switching -------------------------------------------------------
 document.querySelectorAll(".tab").forEach((btn) => {
@@ -18,6 +19,14 @@ function simParams() {
   const drops = $("dropped_events").value.split(",").map((s) => parseInt(s.trim(), 10))
     .filter((n) => Number.isInteger(n));
   const channels = Math.max(1, Math.min(2, num("channels")));
+  const steps = [];
+  if (num("step_time") > 0 && num("step_delta") !== 0) {
+    steps.push([num("step_time"), num("step_delta") / 1000]);
+  }
+  const mis = [];
+  if (num("mis_idx") >= 0 && num("mis_shift") !== 0) {
+    mis.push([num("mis_idx"), num("mis_shift") / 1000]);
+  }
   return {
     n_events: num("n_events"), source_fps: num("source_fps"),
     recorded_fps: num("recorded_fps"), channels,
@@ -27,6 +36,8 @@ function simParams() {
     exposure_drift: num("exposure_drift"),
     echo_delay: num("echo_delay") / 1000, echo_gain: num("echo_gain"),
     dropped_events: drops,
+    clock_drift_ppm: num("clock_drift_ppm"),
+    delay_steps: steps, misaligned_events: mis,
   };
 }
 
@@ -135,6 +146,7 @@ function render() {
     : '<div class="origin">⚠ 录制起点未知：仅测量音画相对偏移，不宣称屏幕/扬声器绝对延迟，也不使用任何命令发出时刻。</div>';
 
   renderAdjust(r, job);
+  renderDrift(r);
   plotAll(job.series);
   renderMedia(job.media);
 }
@@ -145,6 +157,161 @@ function metricCard(title, rows) {
     "</div></div>";
 }
 const ms = (s) => (s * 1000).toFixed(2);
+
+// ---- drift / jump analysis ----------------------------------------------
+function driftKeys(r) {
+  return Object.keys(r.drift || {});
+}
+
+function renderDrift(r) {
+  const keys = driftKeys(r);
+  const panel = $("drift-panel");
+  if (!keys.length) { panel.style.display = "none"; return; }
+  panel.style.display = "";
+  if (!state.driftKey || !keys.includes(state.driftKey)) {
+    state.driftKey = keys[0];
+  }
+  $("drift-channel-tabs").innerHTML = keys.map((k) =>
+    `<button class="tab ${k === state.driftKey ? "active" : ""}"
+      data-drift="${k}">${k}</button>`).join("");
+  document.querySelectorAll("[data-drift]").forEach((b) =>
+    b.addEventListener("click", () => {
+      state.driftKey = b.dataset.drift; renderDrift(r);
+    }));
+  const da = r.drift[state.driftKey];
+  $("drift-notes").innerHTML = da.notes.length
+    ? da.notes.map((n) => `<div class="reason">ℹ ${n}</div>`).join("")
+    : "";
+
+  plotDrift(da);
+
+  $("drift-segments").innerHTML = "<h3>分段参数</h3><table><tr>" +
+    "<th>区间 (s)</th><th>状态</th><th>偏移@t_ref (ms)</th>" +
+    "<th>速率 (ppm)</th><th>拟合/留出</th><th>判据</th></tr>" +
+    da.segments.map((s) => s.status === "ok"
+      ? `<tr><td>${s.t_lo.toFixed(2)} ~ ${s.t_hi.toFixed(2)}</td><td>有效</td>
+         <td>${ms(s.offset)} ± ${ms(s.offset_ci95)}</td>
+         <td>${(s.slope * 1e6).toFixed(1)} ± ${(s.slope_ci95 * 1e6).toFixed(1)}</td>
+         <td>${s.n_fit}/${s.n_holdout}</td><td>${s.classification}</td></tr>`
+      : `<tr><td>${s.t_lo.toFixed(2)} ~ ${s.t_hi.toFixed(2)}</td>
+         <td class="warn-text">数据不足</td><td colspan="3">不给确定校准参数</td>
+         <td>${s.n_fit}/${s.n_holdout}</td><td>${s.classification}</td></tr>`
+    ).join("") + "</table>" +
+    (da.jumps.length ? "<h3>跳变</h3><table><tr><th>时刻 (s)</th>" +
+      "<th>阶跃 (ms)</th><th>说明</th></tr>" +
+      da.jumps.map((j) => `<tr><td>${j.time.toFixed(2)}</td>
+        <td>${(j.step * 1000).toFixed(1)} ± ${(j.step_ci95 * 1000).toFixed(1)}</td>
+        <td>${j.note}</td></tr>`).join("") + "</table>" : "");
+
+  $("drift-excluded").innerHTML = da.excluded.length
+    ? "<h3>剔除记录（异常点留痕，未静默删除）</h3><table><tr><th>事件</th>" +
+      "<th>时刻 (s)</th><th>残差 (ms)</th><th>剔除依据</th></tr>" +
+      da.excluded.map((e) => `<tr><td>${e.event_index}</td>
+        <td>${e.time.toFixed(3)}</td><td>${(e.residual * 1000).toFixed(2)}</td>
+        <td>${e.reason}</td></tr>`).join("") + "</table>"
+    : "";
+
+  const vp = da.validation_points;
+  const rmsText = da.rms_after == null
+    ? "无有效留出点"
+    : `RMS ${ms(da.rms_before)} → ${ms(da.rms_after)} ms`;
+  $("drift-validation").innerHTML =
+    `<h3>独立留出验证（未参与拟合）</h3>
+     <div class="metric-row"><span>校正前 → 校正后 <b>${rmsText}</b></span>
+     <span>覆盖范围 <b>${da.t_lo.toFixed(2)} ~ ${da.t_hi.toFixed(2)} s</b>，范围外为外推</span></div>` +
+    (vp.length ? "<table><tr><th>事件</th><th>时刻 (s)</th><th>校正前 (ms)</th>" +
+      "<th>校正后 (ms)</th><th>位置</th></tr>" +
+      vp.map((p) => `<tr class="${p.status === "ok" ? "" : "warn-text"}">
+        <td>${p.event_index}</td><td>${p.time.toFixed(2)}</td>
+        <td>${(p.residual_before * 1000).toFixed(2)}</td>
+        <td>${p.residual_after == null ? "—" : (p.residual_after * 1000).toFixed(2)}</td>
+        <td>${{ ok: "覆盖内", gap: "空洞", extrapolated: "外推",
+                 insufficient: "数据不足" }[p.status]}</td></tr>`).join("") +
+      "</table>" : "");
+
+  $("export-params").disabled = false;
+}
+
+function plotDrift(da) {
+  const cv = $("drift-canvas");
+  const { ctx, w, h } = setupCanvas(cv);
+  ctx.clearRect(0, 0, w, h);
+  const t0 = da.t_lo, t1 = da.t_hi;
+  if (!(t1 > t0)) return;
+  const all = da.fit_series.map((p) => p[1])
+    .concat(da.validation_points.map((p) => p.residual_before))
+    .concat(da.excluded.map((e) => e.residual));
+  if (!all.length) return;
+  let y0 = Math.min(...all), y1 = Math.max(...all);
+  const pad = Math.max((y1 - y0) * 0.15, 0.001);
+  y0 -= pad; y1 += pad;
+  const x = (t) => ((t - t0) / (t1 - t0)) * (w - 8) + 4;
+  const y = (r) => h - 16 - ((r - y0) / (y1 - y0)) * (h - 32);
+  // gap shading: no parameters claimed there
+  da.segments.forEach((s) => (s.gaps || []).forEach(([lo, hi]) => {
+    ctx.fillStyle = "rgba(255,209,102,0.15)";
+    ctx.fillRect(x(lo), 0, Math.max(2, x(hi) - x(lo)), h);
+  }));
+  // fitted segment lines
+  da.segments.forEach((s) => {
+    if (s.status !== "ok") return;
+    ctx.strokeStyle = "#57d98a";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const f = (t) => s.offset + s.slope * (t - s.t_ref);
+    ctx.moveTo(x(s.t_lo), y(f(s.t_lo)));
+    ctx.lineTo(x(s.t_hi), y(f(s.t_hi)));
+    ctx.stroke();
+  });
+  // jump boundaries
+  da.jumps.forEach((j) => {
+    ctx.strokeStyle = "#ffd166";
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(x(j.time), 0); ctx.lineTo(x(j.time), h);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  });
+  // fit points
+  ctx.fillStyle = "#4cc9f0";
+  da.fit_series.forEach(([t, r]) => {
+    ctx.beginPath(); ctx.arc(x(t), y(r), 2.5, 0, 7); ctx.fill();
+  });
+  // holdout validation points (hollow)
+  ctx.strokeStyle = "#b8c4d4";
+  da.validation_points.forEach((p) => {
+    ctx.beginPath(); ctx.arc(x(p.time), y(p.residual_before), 3.5, 0, 7);
+    ctx.stroke();
+  });
+  // excluded outliers (red cross)
+  ctx.strokeStyle = "#ef476f";
+  da.excluded.forEach((e) => {
+    const px = x(e.time), py = y(e.residual);
+    ctx.beginPath();
+    ctx.moveTo(px - 4, py - 4); ctx.lineTo(px + 4, py + 4);
+    ctx.moveTo(px + 4, py - 4); ctx.lineTo(px - 4, py + 4);
+    ctx.stroke();
+  });
+}
+
+$("export-params").addEventListener("click", async () => {
+  const st = $("export-status");
+  st.className = "status";
+  const res = await fetch("/api/export");
+  if (!res.ok) {
+    const j = await res.json();
+    st.className = "status error";
+    st.textContent = "导出失败：" + (j.error || res.status);
+    return;
+  }
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "playback_params.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+  st.className = "status ok";
+  st.textContent = "已导出参数文件（仅生成文件，未修改任何设备设置）。";
+});
 
 // ---- kernel-driven delay adjustment -------------------------------------
 function renderAdjust(r, job) {
@@ -180,13 +347,60 @@ $("apply-delay").addEventListener("click", async () => {
   const fb = $("applied-feedback");
   if (r.ok) {
     state.applied = r.applied_delay;
+    state.validationLog = r.validation_log || state.validationLog;
     fb.className = "status ok";
     fb.textContent = "已应用修正（内核确认）：" + JSON.stringify(r.applied_delay);
+    renderCorrected(r.corrected, r.anomalies);
+    renderValidationLog();
+    plotAll(state.job.series);  // playback markers move by the applied delay
   } else {
     fb.className = "status error";
     fb.textContent = "被内核拒绝：" + r.error;
   }
 });
+
+function renderCorrected(corrected, anomalies) {
+  if (!corrected) return;
+  let html = "<h3>修正后测量偏移（实际运算）</h3><table><tr>" +
+    "<th>对象</th><th>修正后偏移 (ms)</th><th>95% 半宽</th><th>判定</th></tr>";
+  corrected.av.forEach((c) => {
+    const bad = Math.abs(c.corrected_ms) > c.ci95_half_ms;
+    html += `<tr class="${bad ? "warn-text" : ""}"><td>音画 ch${c.channel}</td>
+      <td>${c.corrected_ms.toFixed(2)}</td><td>${c.ci95_half_ms.toFixed(2)}</td>
+      <td>${bad ? "⚠ 异常" : "在区间内"}</td></tr>`;
+  });
+  corrected.channels.forEach((c) => {
+    html += `<tr><td>${c.kind === "video" ? "视频" : "音频 ch" + c.channel}
+      （绝对）</td><td>${c.corrected_ms.toFixed(2)}</td>
+      <td colspan="2">已应用 ${c.applied_ms.toFixed(2)} ms</td></tr>`;
+  });
+  html += "</table>";
+  if (anomalies && anomalies.length) {
+    html += anomalies.map((a) => `<div class="reason">⚠ ${a}</div>`).join("");
+  }
+  $("corrected-offsets").innerHTML = html;
+}
+
+function renderValidationLog() {
+  const log = state.validationLog || [];
+  if (!log.length) { $("validation-log").innerHTML = ""; return; }
+  let html = "<h3>校准前后独立验证记录</h3><table><tr><th>时间</th>" +
+    "<th>应用延迟 (ms)</th><th>通道</th><th>留出验证 RMS 前→后 (ms)</th>" +
+    "<th>异常</th></tr>";
+  log.forEach((e) => {
+    const hv = e.holdout_validation || {};
+    const keys = Object.keys(hv);
+    const first = keys.length ? hv[keys[0]] : null;
+    html += `<tr><td>${e.time}</td>
+      <td>${JSON.stringify(e.applied_delay)}</td>
+      <td>${keys.join(", ") || "—"}</td>
+      <td>${first && first.rms_after_ms != null
+            ? `${first.rms_before_ms.toFixed(2)} → ${first.rms_after_ms.toFixed(2)}`
+            : "—"}</td>
+      <td>${(e.anomalies || []).length ? e.anomalies.join("；") : "无"}</td></tr>`;
+  });
+  $("validation-log").innerHTML = html + "</table>";
+}
 
 // ---- canvas plots --------------------------------------------------------
 function setupCanvas(cv) {
@@ -196,6 +410,12 @@ function setupCanvas(cv) {
   const ctx = cv.getContext("2d");
   ctx.scale(dpr, dpr);
   return { ctx, w, h: cv.height };
+}
+
+function appliedShift(kind, channel) {
+  // applied delay (s) by which this path's playback markers move
+  const key = kind === "video" ? "video_delay_ms" : `audio_ch${channel}_delay_ms`;
+  return (state.applied[key] || 0) / 1000;
 }
 
 function plotAll(series) {
@@ -230,6 +450,11 @@ function plotWave(series) {
   series.audio_detections.forEach((dets) =>
     dets.forEach((d) => !d.rejected && marks.push(d)));
   drawMarks(ctx, marks, x, h, "audio");
+  // corrected playback markers: shifted by the applied delay (real arithmetic)
+  marks.forEach((d) => {
+    const sh = appliedShift("audio", d.channel);
+    if (sh) drawCorrected(ctx, x(d.time + sh), h);
+  });
   cv._marks = marks; cv._x = x;
 }
 
@@ -261,6 +486,10 @@ function plotBrightness(series) {
     ctx.stroke();
   });
   drawMarks(ctx, marks, x, h, "video");
+  marks.forEach((d) => {
+    const sh = appliedShift("video", -1);
+    if (sh) drawCorrected(ctx, x(d.time + sh), h);
+  });
   cv._marks = marks; cv._x = x;
 }
 
@@ -272,6 +501,13 @@ function drawMarks(ctx, marks, x, h, kind) {
     ctx.moveTo(px, 0); ctx.lineTo(px + 5, 8); ctx.lineTo(px - 5, 8);
     ctx.closePath(); ctx.fill();
   });
+}
+
+function drawCorrected(ctx, px, h) {
+  ctx.fillStyle = "#57d98a";
+  ctx.beginPath();
+  ctx.moveTo(px, h); ctx.lineTo(px + 5, h - 8); ctx.lineTo(px - 5, h - 8);
+  ctx.closePath(); ctx.fill();
 }
 
 // ---- event selection -----------------------------------------------------
@@ -317,5 +553,7 @@ function renderMedia(media) {
 // restore last state on load
 fetch("/api/state").then((r) => r.json()).then((s) => {
   state.applied = s.applied_delay || {};
+  state.validationLog = s.validation_log || [];
   if (s.job && s.job.status === "done") { state.job = s.job; render(); }
+  renderValidationLog();
 });
